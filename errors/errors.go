@@ -43,6 +43,12 @@ var (
 	ErrUnsupportedPlatform = errors.New("unsupported platform in gnet")
 	// ErrConnectionClosed occurs when trying to operate a closed connection.
 	ErrConnectionClosed = errors.New("connection is already closed")
+	// ErrUnsupportedLoadBalancer accurs when using an unsupported load balancer.
+	ErrUnsupportedLoadBalancer = errors.New("unsupported load balancer in gnet")
+	// ErrTooManyPositiveServers accurs when running another serial or network positive server.
+	ErrTooManyPositiveServers = errors.New("too many positive server to run")
+	// ErrUnsupportedPositiveServer accurs when running neither serial nor network positive server.
+	ErrUnsupportedPositiveServer = errors.New("unsupported positive server type")
 
 	// ================================================= codec errors =================================================
 

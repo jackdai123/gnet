@@ -24,21 +24,21 @@ package socket
 
 import (
 	"net"
-
-	"golang.org/x/sys/unix"
+	"syscall"
+	//"golang.org/x/sys/unix"
 )
 
 // SockaddrToTCPOrUnixAddr converts a Sockaddr to a net.TCPAddr or net.UnixAddr.
 // Returns nil if conversion fails.
-func SockaddrToTCPOrUnixAddr(sa unix.Sockaddr) net.Addr {
+func SockaddrToTCPOrUnixAddr(sa syscall.Sockaddr) net.Addr {
 	switch sa := sa.(type) {
-	case *unix.SockaddrInet4:
+	case *syscall.SockaddrInet4:
 		ip := sockaddrInet4ToIP(sa)
 		return &net.TCPAddr{IP: ip, Port: sa.Port}
-	case *unix.SockaddrInet6:
+	case *syscall.SockaddrInet6:
 		ip, zone := sockaddrInet6ToIPAndZone(sa)
 		return &net.TCPAddr{IP: ip, Port: sa.Port, Zone: zone}
-	case *unix.SockaddrUnix:
+	case *syscall.SockaddrUnix:
 		return &net.UnixAddr{Name: sa.Name, Net: "unix"}
 	}
 	return nil
@@ -46,12 +46,12 @@ func SockaddrToTCPOrUnixAddr(sa unix.Sockaddr) net.Addr {
 
 // SockaddrToUDPAddr converts a Sockaddr to a net.UDPAddr
 // Returns nil if conversion fails.
-func SockaddrToUDPAddr(sa unix.Sockaddr) net.Addr {
+func SockaddrToUDPAddr(sa syscall.Sockaddr) net.Addr {
 	switch sa := sa.(type) {
-	case *unix.SockaddrInet4:
+	case *syscall.SockaddrInet4:
 		ip := sockaddrInet4ToIP(sa)
 		return &net.UDPAddr{IP: ip, Port: sa.Port}
-	case *unix.SockaddrInet6:
+	case *syscall.SockaddrInet6:
 		ip, zone := sockaddrInet6ToIPAndZone(sa)
 		return &net.UDPAddr{IP: ip, Port: sa.Port, Zone: zone}
 	}
@@ -60,7 +60,7 @@ func SockaddrToUDPAddr(sa unix.Sockaddr) net.Addr {
 
 // sockaddrInet4ToIPAndZone converts a SockaddrInet4 to a net.IP.
 // It returns nil if conversion fails.
-func sockaddrInet4ToIP(sa *unix.SockaddrInet4) net.IP {
+func sockaddrInet4ToIP(sa *syscall.SockaddrInet4) net.IP {
 	ip := make([]byte, 16)
 	// V4InV6Prefix
 	ip[10] = 0xff
@@ -71,7 +71,7 @@ func sockaddrInet4ToIP(sa *unix.SockaddrInet4) net.IP {
 
 // sockaddrInet6ToIPAndZone converts a SockaddrInet6 to a net.IP with IPv6 Zone.
 // It returns nil if conversion fails.
-func sockaddrInet6ToIPAndZone(sa *unix.SockaddrInet6) (net.IP, string) {
+func sockaddrInet6ToIPAndZone(sa *syscall.SockaddrInet6) (net.IP, string) {
 	ip := make([]byte, 16)
 	copy(ip, sa.Addr[:])
 	return ip, ip6ZoneToString(int(sa.ZoneId))

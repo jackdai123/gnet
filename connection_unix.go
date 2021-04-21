@@ -27,7 +27,9 @@ package gnet
 import (
 	"net"
 	"os"
+	"syscall"
 
+	"github.com/jackdai123/endpoint"
 	"github.com/panjf2000/gnet/internal/socket"
 	"github.com/panjf2000/gnet/pool/bytebuffer"
 	prb "github.com/panjf2000/gnet/pool/ringbuffer"
@@ -37,7 +39,7 @@ import (
 
 type conn struct {
 	fd             int                    // file descriptor
-	sa             unix.Sockaddr          // remote socket address
+	sa             syscall.Sockaddr       // remote socket address
 	ctx            interface{}            // user-defined context
 	loop           *eventloop             // connected event-loop
 	codec          ICodec                 // codec for TCP
@@ -48,9 +50,34 @@ type conn struct {
 	byteBuffer     *bytebuffer.ByteBuffer // bytes buffer for buffering current packet and data in ring-buffer
 	inboundBuffer  *ringbuffer.RingBuffer // buffer for data from client
 	outboundBuffer *ringbuffer.RingBuffer // buffer for data that is ready to write to client
+	endpointType   endpoint.EndPointType  // 连接的IO资源类型
 }
 
-func newTCPConn(fd int, el *eventloop, sa unix.Sockaddr, remoteAddr net.Addr) (c *conn) {
+func newConn(t endpoint.EndPointType, fd int, el *eventloop, sa syscall.Sockaddr, remoteAddr net.Addr, codec ICodec) (c *conn) {
+	switch t {
+	case endpoint.EndPointTCP, endpoint.EndPointUnix, endpoint.EndPointSerial:
+		c = newTCPConn(fd, el, sa, remoteAddr)
+	case endpoint.EndPointUDP:
+		c = newUDPConn(fd, el, sa)
+	}
+
+	c.endpointType = t
+	if codec != nil {
+		c.codec = codec
+	}
+	return
+}
+
+func (c *conn) releaseConn() {
+	switch c.endpointType {
+	case endpoint.EndPointTCP, endpoint.EndPointUnix, endpoint.EndPointSerial:
+		c.releaseTCP()
+	case endpoint.EndPointUDP:
+		c.releaseUDP()
+	}
+}
+
+func newTCPConn(fd int, el *eventloop, sa syscall.Sockaddr, remoteAddr net.Addr) (c *conn) {
 	return &conn{
 		fd:             fd,
 		sa:             sa,
@@ -60,6 +87,7 @@ func newTCPConn(fd int, el *eventloop, sa unix.Sockaddr, remoteAddr net.Addr) (c
 		remoteAddr:     remoteAddr,
 		inboundBuffer:  prb.Get(),
 		outboundBuffer: prb.Get(),
+		endpointType:   endpoint.EndPointTCP,
 	}
 }
 
@@ -78,12 +106,13 @@ func (c *conn) releaseTCP() {
 	c.byteBuffer = nil
 }
 
-func newUDPConn(fd int, el *eventloop, sa unix.Sockaddr) *conn {
+func newUDPConn(fd int, el *eventloop, sa syscall.Sockaddr) *conn {
 	return &conn{
-		fd:         fd,
-		sa:         sa,
-		localAddr:  el.ln.lnaddr,
-		remoteAddr: socket.SockaddrToUDPAddr(sa),
+		fd:           fd,
+		sa:           sa,
+		localAddr:    el.ln.lnaddr,
+		remoteAddr:   socket.SockaddrToUDPAddr(sa),
+		endpointType: endpoint.EndPointUDP,
 	}
 }
 
@@ -140,7 +169,7 @@ func (c *conn) write(buf []byte) (err error) {
 }
 
 func (c *conn) sendTo(buf []byte) error {
-	return unix.Sendto(c.fd, buf, 0, c.sa)
+	return syscall.Sendto(c.fd, buf, 0, c.sa)
 }
 
 // ================================= Public APIs of gnet.Conn =================================

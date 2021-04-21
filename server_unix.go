@@ -49,7 +49,8 @@ type server struct {
 	eventHandler EventHandler       // user eventHandler
 }
 
-var serverFarm sync.Map
+var serverFarm sync.Map   //key是网络地址、Serial或Network，value是server指针
+var endpointFarm sync.Map //key是网络地址、串口文件路径，value是[]EndPoint切片
 
 func (svr *server) isInShutdown() bool {
 	return atomic.LoadInt32(&svr.inShutdown) == 1
@@ -104,7 +105,7 @@ func (svr *server) activateEventLoops(numEventLoop int) (err error) {
 	// Create loops locally and bind the listeners.
 	for i := 0; i < numEventLoop; i++ {
 		l := svr.ln
-		if i > 0 && svr.opts.ReusePort {
+		if i > 0 && svr.opts.ReusePort && l != nil { // 主动服务无需监听服务端口
 			if l, err = initListener(svr.ln.network, svr.ln.addr, svr.opts); err != nil {
 				return
 			}
@@ -120,7 +121,9 @@ func (svr *server) activateEventLoops(numEventLoop int) (err error) {
 			el.connections = make(map[int]*conn)
 			el.eventHandler = svr.eventHandler
 			el.calibrateCallback = svr.lb.calibrate
-			_ = el.poller.AddRead(el.ln.fd)
+			if el.ln != nil { // 主动服务无需监听服务端口
+				_ = el.poller.AddRead(el.ln.fd)
+			}
 			svr.lb.register(el)
 
 			// Start the ticker.
@@ -186,7 +189,8 @@ func (svr *server) activateReactors(numEventLoop int) error {
 }
 
 func (svr *server) start(numEventLoop int) error {
-	if svr.opts.ReusePort || svr.ln.network == "udp" {
+	// 主动服务（ln为nil）直接激活EventLoops
+	if svr.ln == nil || svr.opts.ReusePort || svr.ln.network == "udp" {
 		return svr.activateEventLoops(numEventLoop)
 	}
 
@@ -237,7 +241,7 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 	if options.Multicore {
 		numEventLoop = runtime.NumCPU()
 	}
-	if options.NumEventLoop > 0 {
+	if options.NumEventLoop > 1 {
 		numEventLoop = options.NumEventLoop
 	}
 
@@ -253,6 +257,8 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 		svr.lb = new(leastConnectionsLoadBalancer)
 	case SourceAddrHash:
 		svr.lb = new(sourceAddrHashLoadBalancer)
+	default:
+		return errors.ErrUnsupportedLoadBalancer
 	}
 
 	svr.cond = sync.NewCond(&sync.Mutex{})

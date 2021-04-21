@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -72,7 +73,9 @@ func (el *eventloop) loopRun(lockOSThread bool) {
 
 	defer func() {
 		el.closeAllConns()
-		el.ln.close()
+		if el.ln != nil { // 主动服务无需监听服务端口
+			el.ln.close()
+		}
 		el.svr.signalShutdown()
 	}()
 
@@ -86,7 +89,7 @@ func (el *eventloop) loopAccept(fd int) error {
 			return el.loopReadUDP(fd)
 		}
 
-		nfd, sa, err := unix.Accept(fd)
+		nfd, sa, err := syscall.Accept(fd)
 		if err != nil {
 			if err == unix.EAGAIN {
 				return nil
@@ -222,7 +225,7 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 		if el.eventHandler.OnClosed(c, err) == Shutdown {
 			return gerrors.ErrServerShutdown
 		}
-		c.releaseTCP()
+		c.releaseConn()
 	} else {
 		if err0 != nil {
 			rerr = fmt.Errorf("failed to delete fd=%d from poller in event-loop(%d): %v", c.fd, el.idx, err0)
@@ -298,7 +301,7 @@ func (el *eventloop) handleAction(c *conn, action Action) error {
 }
 
 func (el *eventloop) loopReadUDP(fd int) error {
-	n, sa, err := unix.Recvfrom(fd, el.packet, 0)
+	n, sa, err := syscall.Recvfrom(fd, el.packet, 0)
 	if err != nil {
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 			return nil
@@ -317,6 +320,28 @@ func (el *eventloop) loopReadUDP(fd int) error {
 		return gerrors.ErrServerShutdown
 	}
 	c.releaseUDP()
+
+	return nil
+}
+
+func (el *eventloop) loopReadUDP2(c *conn) error {
+	n, _, err := unix.Recvfrom(c.fd, el.packet, 0)
+	if err != nil {
+		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+			return nil
+		}
+		return fmt.Errorf("failed to read UDP packet from fd=%d in event-loop(%d), %v",
+			c.fd, el.idx, os.NewSyscallError("recvfrom", err))
+	}
+
+	out, action := el.eventHandler.React(el.packet[:n], c)
+	if out != nil {
+		el.eventHandler.PreWrite()
+		_ = c.sendTo(out)
+	}
+	if action == Shutdown {
+		return gerrors.ErrServerShutdown
+	}
 
 	return nil
 }

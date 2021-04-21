@@ -24,6 +24,7 @@ package gnet
 
 import (
 	"os"
+	"syscall"
 
 	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/socket"
@@ -31,7 +32,7 @@ import (
 )
 
 func (svr *server) acceptNewConnection(fd int) error {
-	nfd, sa, err := unix.Accept(fd)
+	nfd, sa, err := syscall.Accept(fd)
 	if err != nil {
 		if err == unix.EAGAIN {
 			return nil

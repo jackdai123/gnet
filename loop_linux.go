@@ -20,10 +20,18 @@
 
 package gnet
 
-import "github.com/panjf2000/gnet/internal/netpoll"
+import (
+	"github.com/jackdai123/endpoint"
+	"github.com/panjf2000/gnet/internal/netpoll"
+)
 
 func (el *eventloop) handleEvent(fd int, ev uint32) error {
 	if c, ok := el.connections[fd]; ok {
+		// UDP直接recvfrom和sendto
+		if c.endpointType == endpoint.EndPointUDP {
+			return el.loopReadUDP2(c)
+		}
+
 		// Don't change the ordering of processing EPOLLOUT | EPOLLRDHUP / EPOLLIN unless you're 100%
 		// sure what you're doing!
 		// Re-ordering can easily introduce bugs and bad side-effects, as I found out painfully in the past.

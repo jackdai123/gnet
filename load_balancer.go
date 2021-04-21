@@ -51,6 +51,7 @@ type (
 		register(*eventloop)
 		next(net.Addr) *eventloop
 		iterate(func(int, *eventloop) bool)
+		find(int) *eventloop
 		len() int
 		calibrate(*eventloop, int32)
 	}
@@ -101,6 +102,15 @@ func (lb *roundRobinLoadBalancer) iterate(f func(int, *eventloop) bool) {
 			break
 		}
 	}
+}
+
+func (lb *roundRobinLoadBalancer) find(fd int) (el *eventloop) {
+	for _, el := range lb.eventLoops {
+		if _, ok := el.connections[fd]; ok {
+			return el
+		}
+	}
+	return nil
 }
 
 func (lb *roundRobinLoadBalancer) len() int {
@@ -186,6 +196,17 @@ func (lb *leastConnectionsLoadBalancer) iterate(f func(int, *eventloop) bool) {
 	lb.RUnlock()
 }
 
+func (lb *leastConnectionsLoadBalancer) find(fd int) (el *eventloop) {
+	lb.RLock()
+	defer lb.RUnlock()
+	for _, el := range lb.minHeap {
+		if _, ok := el.connections[fd]; ok {
+			return el
+		}
+	}
+	return nil
+}
+
 func (lb *leastConnectionsLoadBalancer) len() (size int) {
 	lb.RLock()
 	size = lb.minHeap.Len()
@@ -233,6 +254,15 @@ func (lb *sourceAddrHashLoadBalancer) iterate(f func(int, *eventloop) bool) {
 			break
 		}
 	}
+}
+
+func (lb *sourceAddrHashLoadBalancer) find(fd int) (el *eventloop) {
+	for _, el := range lb.eventLoops {
+		if _, ok := el.connections[fd]; ok {
+			return el
+		}
+	}
+	return nil
 }
 
 func (lb *sourceAddrHashLoadBalancer) len() int {

@@ -27,8 +27,10 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/jackdai123/endpoint"
 	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal"
 	"github.com/panjf2000/gnet/internal/logging"
@@ -247,6 +249,9 @@ func (es *EventServer) Tick() (delay time.Duration, action Action) {
 //  unix  - Unix Domain Socket
 //
 // The "tcp" network scheme is assumed when one is not specified.
+//
+// 当protoAddr是Serial或Network时，启动主动服务，主动打开串口或网口，管理多种协议客户端于一个服务
+// 主动服务同时只能服务一种网络资源类型（protoAddr），即要么管理串口资源（Serial），要么管理网口资源（Network）
 func Serve(eventHandler EventHandler, protoAddr string, opts ...Option) (err error) {
 	options := loadOptions(opts...)
 
@@ -269,13 +274,22 @@ func Serve(eventHandler EventHandler, protoAddr string, opts ...Option) (err err
 		options.ReadBufferCap = internal.CeilToPowerOfTwo(rbc)
 	}
 
-	network, addr := parseProtoAddr(protoAddr)
-
 	var ln *listener
-	if ln, err = initListener(network, addr, options); err != nil {
-		return
+	var network, addr string
+
+	switch protoAddr {
+	case "Serial", "Network":
+		if _, ok := serverFarm.Load(protoAddr); ok { // 有且只能有一个Serial和Network主动服务
+			logging.DefaultLogger.Errorf("only run serial or network positive server once")
+			return errors.ErrTooManyPositiveServers
+		}
+	default: // 被动等待连接的服务，监听服务端口
+		network, addr = parseProtoAddr(protoAddr)
+		if ln, err = initListener(network, addr, options); err != nil {
+			return
+		}
+		defer ln.close()
 	}
-	defer ln.close()
 
 	return serve(eventHandler, ln, options, protoAddr)
 }
@@ -285,6 +299,8 @@ var shutdownPollInterval = 500 * time.Millisecond
 
 // Stop gracefully shuts down the server without interrupting any active eventloops,
 // it waits indefinitely for connections and eventloops to be closed and then shuts down.
+//
+// 当protoAddr是Serial或Network时，关闭主动服务
 func Stop(ctx context.Context, protoAddr string) error {
 	var svr *server
 	if s, ok := serverFarm.Load(protoAddr); ok {
@@ -311,6 +327,93 @@ func Stop(ctx context.Context, protoAddr string) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// 主动服务启动后，添加要打开的IO资源（串口或网口地址），protoAddr是Serial或Network
+// codec指定Encode和Decode方法，用以数据帧的打包和解包，Endpoint对应唯一codec，即一个串口下只允许接同类设备
+func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) (err error) {
+	if protoAddr != "Serial" && protoAddr != "Network" {
+		return errors.ErrUnsupportedPositiveServer
+	}
+
+	// 根据IO资源类型找到对应的主动服务
+	var svr *server
+	if s, ok := serverFarm.Load(protoAddr); ok {
+		svr = s.(*server)
+		if svr.isInShutdown() {
+			return errors.ErrServerInShutdown
+		}
+	} else {
+		return errors.ErrServerInShutdown
+	}
+
+	// 打开并管理IO资源
+	var p endpoint.EndPoint
+	p, err = endpoint.Open(conf, &endpointFarm)
+	if err != nil {
+		return err
+	}
+
+	// 根据负载均衡定位到相应的IO线程
+	el := svr.lb.next(p.NetAddr())
+
+	// 构造连接
+	conn := newConn(p.Type(), p.Fd(), el, p.SockAddr(), p.NetAddr(), codec)
+
+	// 触发相应的IO线程监听IO资源
+	err = el.poller.Trigger(func() (err error) {
+		if err = el.poller.AddRead(p.Fd()); err != nil {
+			_ = syscall.Close(p.Fd())
+			conn.releaseConn()
+			return
+		}
+		el.connections[p.Fd()] = conn
+		err = el.loopOpen(conn)
+		return
+	})
+	if err != nil {
+		_ = syscall.Close(p.Fd())
+		conn.releaseConn()
+	}
+
+	return
+}
+
+// 主动服务打开IO资源后，关闭IO资源，protoAddr是Serial或Network
+func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
+	if protoAddr != "Serial" && protoAddr != "Network" {
+		return errors.ErrUnsupportedPositiveServer
+	}
+
+	// 根据IO资源类型找到对应的主动服务
+	var svr *server
+	if s, ok := serverFarm.Load(protoAddr); ok {
+		svr = s.(*server)
+		if svr.isInShutdown() {
+			return errors.ErrServerInShutdown
+		}
+	} else {
+		return errors.ErrServerInShutdown
+	}
+
+	// 根据网络地址或串口文件路径，查找已打开的EndPoint，定位到相应的IO线程去关闭IO资源
+	if endpointSlice, ok := endpoint.Find(conf, &endpointFarm); ok {
+		for _, p := range endpointSlice {
+			if el := svr.lb.find(p.Fd()); el != nil {
+				err = el.poller.Trigger(func() (err error) {
+					if c, ok := el.connections[p.Fd()]; ok {
+						return el.loopCloseConn(c, nil)
+					} else {
+						return nil
+					}
+				})
+				sniffErrorAndLog(err)
+			}
+		}
+		endpoint.Delete(conf, &endpointFarm)
+	}
+
+	return
 }
 
 func parseProtoAddr(addr string) (network, address string) {
