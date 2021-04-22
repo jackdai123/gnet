@@ -49,6 +49,8 @@ var (
 	ErrTooManyPositiveServers = errors.New("too many positive server to run")
 	// ErrUnsupportedPositiveServer accurs when running neither serial nor network positive server.
 	ErrUnsupportedPositiveServer = errors.New("unsupported positive server type")
+	// ErrSerialOpenRepeated accurs when opening serial repeated.
+	ErrSerialOpenRepeated = errors.New("opening serial repeated is unsupported")
 
 	// ================================================= codec errors =================================================
 

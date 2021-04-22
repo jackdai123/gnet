@@ -27,7 +27,6 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/jackdai123/endpoint"
@@ -347,9 +346,9 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 		return errors.ErrServerInShutdown
 	}
 
-	// 打开并管理IO资源
+	// 打开并管理IO资源，网络资源可以被打开多次
 	var p endpoint.EndPoint
-	p, err = endpoint.Open(conf, &endpointFarm)
+	p, err = openEndpoint(conf)
 	if err != nil {
 		return err
 	}
@@ -363,24 +362,25 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 	// 触发相应的IO线程监听IO资源
 	err = el.poller.Trigger(func() (err error) {
 		if err = el.poller.AddRead(p.Fd()); err != nil {
-			_ = syscall.Close(p.Fd())
 			conn.releaseConn()
+			deleteEndpoint(conf.AddressName(), p.Fd())
+			p.Close()
 			return
 		}
 		el.connections[p.Fd()] = conn
-		err = el.loopOpen(conn)
-		return
+		return el.loopOpen(conn)
 	})
 	if err != nil {
-		_ = syscall.Close(p.Fd())
 		conn.releaseConn()
+		deleteEndpoint(conf.AddressName(), p.Fd())
+		p.Close()
 	}
 
 	return
 }
 
 // 主动服务打开IO资源后，关闭IO资源，protoAddr是Serial或Network
-func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
+func CloseEndPoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 	if protoAddr != "Serial" && protoAddr != "Network" {
 		return errors.ErrUnsupportedPositiveServer
 	}
@@ -397,22 +397,20 @@ func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 	}
 
 	// 根据网络地址或串口文件路径，查找已打开的EndPoint，定位到相应的IO线程去关闭IO资源
-	if endpointSlice, ok := endpoint.Find(conf, &endpointFarm); ok {
-		for _, p := range endpointSlice {
-			if el := svr.lb.find(p.Fd()); el != nil {
-				err = el.poller.Trigger(func() (err error) {
-					if c, ok := el.connections[p.Fd()]; ok {
-						return el.loopCloseConn(c, nil)
-					} else {
-						return nil
-					}
-				})
-				sniffErrorAndLog(err)
-			}
+	err = iterateEndpoint(conf.AddressName(), func(p endpoint.EndPoint) (err error) {
+		if el, c := svr.lb.find(p.Fd()); el != nil && c != nil {
+			err = el.poller.Trigger(func() error {
+				return el.loopCloseConn(c, nil)
+			})
+			sniffErrorAndLog(err)
 		}
-		endpoint.Delete(conf, &endpointFarm)
+		return
+	})
+	if err != nil {
+		return
 	}
 
+	deleteEndpointAll(conf.AddressName())
 	return
 }
 

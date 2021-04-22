@@ -226,6 +226,7 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 			return gerrors.ErrServerShutdown
 		}
 		c.releaseConn()
+		deleteEndpoint(c.RemoteAddr().String(), c.fd)
 	} else {
 		if err0 != nil {
 			rerr = fmt.Errorf("failed to delete fd=%d from poller in event-loop(%d): %v", c.fd, el.idx, err0)
@@ -325,21 +326,27 @@ func (el *eventloop) loopReadUDP(fd int) error {
 }
 
 func (el *eventloop) loopReadUDP2(c *conn) error {
-	n, _, err := unix.Recvfrom(c.fd, el.packet, 0)
+	n, _, err := syscall.Recvfrom(c.fd, el.packet, 0)
 	if err != nil {
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 			return nil
 		}
-		return fmt.Errorf("failed to read UDP packet from fd=%d in event-loop(%d), %v",
-			c.fd, el.idx, os.NewSyscallError("recvfrom", err))
+		//return fmt.Errorf("failed to read UDP packet from fd=%d in event-loop(%d), %v",
+		//	c.fd, el.idx, os.NewSyscallError("recvfrom", err))
+		return el.loopCloseConn(c, os.NewSyscallError("recvfrom", err))
 	}
 
 	out, action := el.eventHandler.React(el.packet[:n], c)
 	if out != nil {
 		el.eventHandler.PreWrite()
-		_ = c.sendTo(out)
+		_ = c.sendTo(out) //UDP写失败就丢弃
 	}
-	if action == Shutdown {
+
+	switch action {
+	case None:
+	case Close:
+		return el.loopCloseConn(c, nil)
+	case Shutdown:
 		return gerrors.ErrServerShutdown
 	}
 

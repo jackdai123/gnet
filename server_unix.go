@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackdai123/endpoint"
 	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/logging"
 	"github.com/panjf2000/gnet/internal/netpoll"
@@ -49,8 +50,7 @@ type server struct {
 	eventHandler EventHandler       // user eventHandler
 }
 
-var serverFarm sync.Map   //key是网络地址、Serial或Network，value是server指针
-var endpointFarm sync.Map //key是网络地址、串口文件路径，value是[]EndPoint切片
+var serverFarm sync.Map //一维map，key是网络地址、Serial或Network，value是server指针
 
 func (svr *server) isInShutdown() bool {
 	return atomic.LoadInt32(&svr.inShutdown) == 1
@@ -295,4 +295,89 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 	serverFarm.Store(protoAddr, svr)
 
 	return nil
+}
+
+//二维map，key1是网络地址、串口文件路径，key2是fd，value是EndPoint
+var endpointFarm map[string]map[int]endpoint.EndPoint
+var endpointFarmMutex sync.RWMutex
+var endpointFarmOnce sync.Once
+
+// 打开并管理IO资源
+func openEndpoint(c endpoint.EndPointConfig) (p endpoint.EndPoint, err error) {
+	endpointFarmOnce.Do(func() {
+		endpointFarm = make(map[string]map[int]endpoint.EndPoint)
+	})
+
+	if c.Type() == endpoint.EndPointSerial { //串口
+		if ok := isEndpointExist(c.AddressName()); ok { // 重复打开串口不可以
+			err = errors.ErrSerialOpenRepeated
+		} else {
+			if p, err = endpoint.Open(c); err == nil {
+				storeEndpoint(c.AddressName(), p)
+			}
+		}
+	} else { //网口和UnixSocket
+		if p, err = endpoint.Open(c); err == nil {
+			storeEndpoint(c.AddressName(), p) // 网络可以重复打开
+		}
+	}
+	return
+}
+
+// 迭代endpointFarm
+func iterateEndpoint(addressName string, f func(endpoint.EndPoint) error) error {
+	endpointFarmMutex.RLock()
+	defer endpointFarmMutex.RUnlock()
+
+	if m, ok := endpointFarm[addressName]; ok {
+		for _, p := range m {
+			if err := f(p); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// 删除endpoint
+func deleteEndpointAll(addressName string) {
+	endpointFarmMutex.Lock()
+	defer endpointFarmMutex.Unlock()
+
+	delete(endpointFarm, addressName)
+}
+
+// 删除endpoint
+func deleteEndpoint(addressName string, fd int) {
+	endpointFarmMutex.Lock()
+	defer endpointFarmMutex.Unlock()
+
+	if m, ok := endpointFarm[addressName]; ok {
+		delete(m, fd)
+	}
+}
+
+// 检查EndPoint是否存在
+func isEndpointExist(addressName string) bool {
+	endpointFarmMutex.RLock()
+	defer endpointFarmMutex.RUnlock()
+
+	if _, ok := endpointFarm[addressName]; ok {
+		return true
+	} else {
+		return false
+	}
+}
+
+// 存储EndPoint到endpointFarm
+func storeEndpoint(addressName string, p endpoint.EndPoint) {
+	endpointFarmMutex.Lock()
+	defer endpointFarmMutex.Unlock()
+
+	if m, ok := endpointFarm[addressName]; ok {
+		m[p.Fd()] = p
+	} else {
+		endpointFarm[addressName] = map[int]endpoint.EndPoint{p.Fd(): p}
+	}
 }

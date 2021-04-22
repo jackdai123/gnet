@@ -122,8 +122,16 @@ func (c *conn) releaseUDP() {
 	c.remoteAddr = nil
 }
 
+//func (c *conn) sendTo(buf []byte) error {
 func (c *conn) open(buf []byte) {
-	n, err := unix.Write(c.fd, buf)
+	c.loop.eventHandler.PreWrite()
+
+	if c.endpointType == endpoint.EndPointUDP { //UDP发送
+		_ = c.sendTo(buf)
+		return
+	}
+
+	n, err := unix.Write(c.fd, buf) //TCP、UnixSocket、串口发送
 	if err != nil {
 		_, _ = c.outboundBuffer.Write(buf)
 		return
