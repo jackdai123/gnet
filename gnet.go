@@ -414,6 +414,27 @@ func CloseEndPoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 	return
 }
 
+// IO资源异常事件的类型
+type EndpointEventType int
+
+const (
+	EndpointEventNone  EndpointEventType = iota
+	EndpointEventClose                   //IO资源异常关闭
+)
+
+// IO资源异常事件
+type EndpointEvent struct {
+	Type    EndpointEventType //事件的类型
+	Address string            //IO资源的地址
+	Fd      int               //IO资源的fd
+	Err     error             //出现异常时的错误信息
+}
+
+// 监听主动服务打开的IO资源是否关闭，输出IO资源关闭的事件
+func NotifyEndpointClose(receiver chan *EndpointEvent) chan *EndpointEvent {
+	return addEndpointEventChan(receiver)
+}
+
 func parseProtoAddr(addr string) (network, address string) {
 	network = "tcp"
 	address = strings.ToLower(addr)

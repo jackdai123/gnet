@@ -381,3 +381,26 @@ func storeEndpoint(addressName string, p endpoint.EndPoint) {
 		endpointFarm[addressName] = map[int]endpoint.EndPoint{p.Fd(): p}
 	}
 }
+
+// 给外部输出IO资源异常事件的channel
+var endpointEventChan []chan *EndpointEvent
+var endpointEventChanMutex sync.Mutex
+
+// 新增一条新的channel监听IO资源异常事件
+func addEndpointEventChan(receiver chan *EndpointEvent) chan *EndpointEvent {
+	endpointEventChanMutex.Lock()
+	defer endpointEventChanMutex.Unlock()
+
+	endpointEventChan = append(endpointEventChan, receiver)
+	return receiver
+}
+
+// 推送IO资源异常事件到endpointEventChan
+func pushEndpointEvent(e *EndpointEvent) {
+	endpointEventChanMutex.Lock()
+	defer endpointEventChanMutex.Unlock()
+
+	for _, channel := range endpointEventChan {
+		channel <- e
+	}
+}

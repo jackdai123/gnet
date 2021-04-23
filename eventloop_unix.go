@@ -226,7 +226,13 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 			return gerrors.ErrServerShutdown
 		}
 		c.releaseConn()
-		deleteEndpoint(c.RemoteAddr().String(), c.fd)
+		deleteEndpoint(c.RemoteAddr().String(), c.fd) //endpointFarm与connection同步释放
+		pushEndpointEvent(&EndpointEvent{             //推送IO资源异常事件给外部
+			Type:    EndpointEventClose,
+			Address: c.RemoteAddr().String(),
+			Fd:      c.fd,
+			Err:     err,
+		})
 	} else {
 		if err0 != nil {
 			rerr = fmt.Errorf("failed to delete fd=%d from poller in event-loop(%d): %v", c.fd, el.idx, err0)
