@@ -49,6 +49,25 @@ const (
 	Shutdown
 )
 
+// 给OnError回调函数提供IO异常类型
+type IOErrorType int
+
+const (
+	ErrNone IOErrorType = iota
+	ErrEncode
+	ErrRead
+	ErrWrite
+	ErrRecvFrom
+	ErrSendTo
+	ErrClose
+	ErrPollPolling
+	ErrPollTrigger
+	ErrPollAddWrite
+	ErrPollModRead
+	ErrPollModReadWrite
+	ErrPollDelete
+)
+
 // Server represents a server context which provides information about the
 // running server and has control functions for managing state.
 type Server struct {
@@ -167,6 +186,12 @@ type (
 		// Note that the bytes returned by OnOpened will be sent back to client without being encoded.
 		OnOpened(c Conn) (out []byte, action Action)
 
+		// OnSendSuccess 给设备或子系统发送数据成功后回调此函数，通知上层业务
+		OnSendSuccess(c Conn)
+
+		// OnError IO系统调用出现异常事件，通知上层业务，errType细分到底是哪种异常事件
+		OnError(c Conn, errType IOErrorType, errContent error)
+
 		// OnClosed fires when a connection has been closed.
 		// The parameter:err is the last known connection error.
 		OnClosed(c Conn, err error) (action Action)
@@ -178,7 +203,8 @@ type (
 		// React fires when a connection sends the server data.
 		// Call c.Read() or c.ReadN(n) within the parameter:c to read incoming data from client.
 		// Parameter:out is the return value which is going to be sent back to the client.
-		React(frame []byte, c Conn) (out []byte, action Action)
+		// Parameter:timeWait 将out发送给客户端前的等待时间，即等待timeWait时间再发送out
+		React(frame []byte, c Conn) (out []byte, timeWait time.Duration, action Action)
 
 		// Tick fires immediately after the server starts and will fire again
 		// following the duration specified by the delay return value.
@@ -210,6 +236,16 @@ func (es *EventServer) OnOpened(c Conn) (out []byte, action Action) {
 	return
 }
 
+// OnSendSuccess 当发送数据成功时回调
+func (es *EventServer) OnSendSuccess(c Conn) {
+	return
+}
+
+// OnError IO系统调用出现异常事件，通知上层业务，errType细分到底是哪种异常事件
+func (es *EventServer) OnError(c Conn, errType IOErrorType, errContent error) {
+	return
+}
+
 // OnClosed fires when a connection has been closed.
 // The parameter:err is the last known connection error.
 func (es *EventServer) OnClosed(c Conn, err error) (action Action) {
@@ -224,7 +260,8 @@ func (es *EventServer) PreWrite() {
 // React fires when a connection sends the server data.
 // Call c.Read() or c.ReadN(n) within the parameter:c to read incoming data from client.
 // Parameter:out is the return value which is going to be sent back to the client.
-func (es *EventServer) React(frame []byte, c Conn) (out []byte, action Action) {
+// Parameter:timeWait 将out发送给客户端前的等待时间，即等待timeWait时间再发送out
+func (es *EventServer) React(frame []byte, c Conn) (out []byte, timeWait time.Duration, action Action) {
 	return
 }
 
@@ -329,6 +366,7 @@ func Stop(ctx context.Context, protoAddr string) error {
 }
 
 // 主动服务启动后，添加要打开的IO资源（串口或网口地址），protoAddr是Serial或Network
+// 一种特殊情况，当打开串口服务器时，protoAddr是Serial，conf是TCPConfig
 // codec指定Encode和Decode方法，用以数据帧的打包和解包，Endpoint对应唯一codec，即一个串口下只允许接同类设备
 func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) (err error) {
 	if protoAddr != "Serial" && protoAddr != "Network" {
@@ -348,7 +386,7 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 
 	// 打开并管理IO资源，网络资源可以被打开多次
 	var p endpoint.EndPoint
-	p, err = openEndpoint(conf)
+	p, err = openEndpoint(protoAddr, conf)
 	if err != nil {
 		return err
 	}
@@ -357,7 +395,7 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 	el := svr.lb.next(p.NetAddr())
 
 	// 构造连接
-	conn := newConn(p.Type(), p.Fd(), el, p.SockAddr(), p.NetAddr(), codec)
+	conn := newConn(p, el, codec)
 
 	// 触发相应的IO线程监听IO资源
 	err = el.poller.Trigger(func() (err error) {
@@ -412,27 +450,6 @@ func CloseEndPoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 
 	deleteEndpointAll(conf.AddressName())
 	return
-}
-
-// IO资源异常事件的类型
-type EndpointEventType int
-
-const (
-	EndpointEventNone  EndpointEventType = iota
-	EndpointEventClose                   //IO资源异常关闭
-)
-
-// IO资源异常事件
-type EndpointEvent struct {
-	Type    EndpointEventType //事件的类型
-	Address string            //IO资源的地址
-	Fd      int               //IO资源的fd
-	Err     error             //出现异常时的错误信息
-}
-
-// 监听主动服务打开的IO资源是否关闭，输出IO资源关闭的事件
-func NotifyEndpointClose(receiver chan *EndpointEvent) chan *EndpointEvent {
-	return addEndpointEventChan(receiver)
 }
 
 func parseProtoAddr(addr string) (network, address string) {

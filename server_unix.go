@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RussellLuo/timingwheel"
 	"github.com/jackdai123/endpoint"
 	"github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/logging"
@@ -36,18 +37,19 @@ import (
 )
 
 type server struct {
-	ln           *listener          // the listener for accepting new connections
-	lb           loadBalancer       // event-loops for handling events
-	wg           sync.WaitGroup     // event-loop close WaitGroup
-	opts         *Options           // options with server
-	once         sync.Once          // make sure only signalShutdown once
-	cond         *sync.Cond         // shutdown signaler
-	codec        ICodec             // codec for TCP stream
-	logger       logging.Logger     // customized logger for logging info
-	ticktock     chan time.Duration // ticker channel
-	mainLoop     *eventloop         // main event-loop for accepting connections
-	inShutdown   int32              // whether the server is in shutdown
-	eventHandler EventHandler       // user eventHandler
+	ln           *listener                // the listener for accepting new connections
+	lb           loadBalancer             // event-loops for handling events
+	wg           sync.WaitGroup           // event-loop close WaitGroup
+	opts         *Options                 // options with server
+	once         sync.Once                // make sure only signalShutdown once
+	cond         *sync.Cond               // shutdown signaler
+	codec        ICodec                   // codec for TCP stream
+	logger       logging.Logger           // customized logger for logging info
+	ticktock     chan time.Duration       // ticker channel
+	mainLoop     *eventloop               // main event-loop for accepting connections
+	inShutdown   int32                    // whether the server is in shutdown
+	eventHandler EventHandler             // user eventHandler
+	tw           *timingwheel.TimingWheel //时间轮
 }
 
 var serverFarm sync.Map //一维map，key是网络地址、Serial或Network，value是server指针
@@ -72,11 +74,11 @@ func (svr *server) signalShutdown() {
 	})
 }
 
-func (svr *server) startEventLoops() {
+func (svr *server) startEventLoops(protoAddr string) {
 	svr.lb.iterate(func(i int, el *eventloop) bool {
 		svr.wg.Add(1)
 		go func() {
-			el.loopRun(svr.opts.LockOSThread)
+			el.loopRun(svr.opts.LockOSThread, protoAddr)
 			svr.wg.Done()
 		}()
 		return true
@@ -101,7 +103,7 @@ func (svr *server) startSubReactors() {
 	})
 }
 
-func (svr *server) activateEventLoops(numEventLoop int) (err error) {
+func (svr *server) activateEventLoops(protoAddr string, numEventLoop int) (err error) {
 	// Create loops locally and bind the listeners.
 	for i := 0; i < numEventLoop; i++ {
 		l := svr.ln
@@ -119,6 +121,7 @@ func (svr *server) activateEventLoops(numEventLoop int) (err error) {
 			el.poller = p
 			el.packet = make([]byte, svr.opts.ReadBufferCap)
 			el.connections = make(map[int]*conn)
+			//el.mapTimer = make(map[int]*timingwheel.Timer)
 			el.eventHandler = svr.eventHandler
 			el.calibrateCallback = svr.lb.calibrate
 			if el.ln != nil { // 主动服务无需监听服务端口
@@ -136,7 +139,7 @@ func (svr *server) activateEventLoops(numEventLoop int) (err error) {
 	}
 
 	// Start event-loops in background.
-	svr.startEventLoops()
+	svr.startEventLoops(protoAddr)
 
 	return
 }
@@ -188,10 +191,10 @@ func (svr *server) activateReactors(numEventLoop int) error {
 	return nil
 }
 
-func (svr *server) start(numEventLoop int) error {
+func (svr *server) start(protoAddr string, numEventLoop int) error {
 	// 主动服务（ln为nil）直接激活EventLoops
 	if svr.ln == nil || svr.opts.ReusePort || svr.ln.network == "udp" {
-		return svr.activateEventLoops(numEventLoop)
+		return svr.activateEventLoops(protoAddr, numEventLoop)
 	}
 
 	return svr.activateReactors(numEventLoop)
@@ -225,6 +228,11 @@ func (svr *server) stop(s Server) {
 
 	if svr.mainLoop != nil {
 		sniffErrorAndLog(svr.mainLoop.poller.Close())
+	}
+
+	// 停止时间轮
+	if svr.tw != nil {
+		svr.tw.Stop()
 	}
 
 	// Stop the ticker.
@@ -271,6 +279,22 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 		return options.Codec
 	}()
 
+	//默认串口超时区间在10ms到5000ms，串口命令间隔时间最小XXms
+	var tick time.Duration = 10 * time.Millisecond
+	var size int64 = 500
+	if options.TimingWheelTick > 0 {
+		tick = options.TimingWheelTick
+	}
+	if options.TimingWheelSize > 0 {
+		size = options.TimingWheelSize
+	}
+
+	//主动服务开启时间轮
+	if svr.ln == nil {
+		svr.tw = timingwheel.NewTimingWheel(tick, size)
+		svr.tw.Start()
+	}
+
 	server := Server{
 		svr:          svr,
 		Multicore:    options.Multicore,
@@ -285,7 +309,7 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 		return nil
 	}
 
-	if err := svr.start(numEventLoop); err != nil {
+	if err := svr.start(protoAddr, numEventLoop); err != nil {
 		svr.closeEventLoops()
 		svr.logger.Errorf("gnet server is stopping with error: %v", err)
 		return err
@@ -303,13 +327,13 @@ var endpointFarmMutex sync.RWMutex
 var endpointFarmOnce sync.Once
 
 // 打开并管理IO资源
-func openEndpoint(c endpoint.EndPointConfig) (p endpoint.EndPoint, err error) {
+func openEndpoint(protoAddr string, c endpoint.EndPointConfig) (p endpoint.EndPoint, err error) {
 	endpointFarmOnce.Do(func() {
 		endpointFarm = make(map[string]map[int]endpoint.EndPoint)
 	})
 
-	if c.Type() == endpoint.EndPointSerial { //串口
-		if ok := isEndpointExist(c.AddressName()); ok { // 重复打开串口不可以
+	if protoAddr == "Serial" { //串口和串口服务器
+		if ok := isEndpointExist(c.AddressName()); ok { // 不可以重复打开串口和串口服务器
 			err = errors.ErrSerialOpenRepeated
 		} else {
 			if p, err = endpoint.Open(c); err == nil {
@@ -340,7 +364,7 @@ func iterateEndpoint(addressName string, f func(endpoint.EndPoint) error) error 
 	return nil
 }
 
-// 删除endpoint
+// 根据IO资源名，删除IO资源所有endpoint
 func deleteEndpointAll(addressName string) {
 	endpointFarmMutex.Lock()
 	defer endpointFarmMutex.Unlock()
@@ -348,7 +372,7 @@ func deleteEndpointAll(addressName string) {
 	delete(endpointFarm, addressName)
 }
 
-// 删除endpoint
+// 根据IO资源名和fd，删除IO资源一个endpoint
 func deleteEndpoint(addressName string, fd int) {
 	endpointFarmMutex.Lock()
 	defer endpointFarmMutex.Unlock()
@@ -379,28 +403,5 @@ func storeEndpoint(addressName string, p endpoint.EndPoint) {
 		m[p.Fd()] = p
 	} else {
 		endpointFarm[addressName] = map[int]endpoint.EndPoint{p.Fd(): p}
-	}
-}
-
-// 给外部输出IO资源异常事件的channel
-var endpointEventChan []chan *EndpointEvent
-var endpointEventChanMutex sync.Mutex
-
-// 新增一条新的channel监听IO资源异常事件
-func addEndpointEventChan(receiver chan *EndpointEvent) chan *EndpointEvent {
-	endpointEventChanMutex.Lock()
-	defer endpointEventChanMutex.Unlock()
-
-	endpointEventChan = append(endpointEventChan, receiver)
-	return receiver
-}
-
-// 推送IO资源异常事件到endpointEventChan
-func pushEndpointEvent(e *EndpointEvent) {
-	endpointEventChanMutex.Lock()
-	defer endpointEventChanMutex.Unlock()
-
-	for _, channel := range endpointEventChan {
-		channel <- e
 	}
 }

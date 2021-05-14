@@ -156,6 +156,69 @@ func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 	}
 }
 
+// 串口主动服务的IO事件轮询
+func (p *Poller) PollingSerial(callback func(fd int, ev uint32) error) error {
+	el := newEventList(InitEvents)
+	var wakenUp bool
+
+	msec := -1
+	for {
+		n, err := unix.EpollWait(p.fd, el.events, msec)
+		if n == 0 || (n < 0 && err == unix.EINTR) {
+			msec = -1
+			runtime.Gosched()
+			continue
+		} else if err != nil {
+			logging.DefaultLogger.Warnf("Error occurs in epoll: %v", os.NewSyscallError("epoll_wait", err))
+			return err
+		}
+		msec = 0
+
+		for i := 0; i < n; i++ {
+			if fd := int(el.events[i].Fd); fd != p.wfd {
+				switch err = callback(fd, el.events[i].Events); err {
+				case nil:
+				case errors.ErrAcceptSocket, errors.ErrServerShutdown:
+					return err
+				default:
+					logging.DefaultLogger.Warnf("Error occurs in event-loop: %v", err)
+				}
+			} else {
+				wakenUp = true
+				_, _ = unix.Read(p.wfd, p.wfdBuf)
+			}
+		}
+
+		if wakenUp {
+			wakenUp = false
+			var task queue.Task
+			for i := 0; i < AsyncTasks; i++ {
+				if task = p.asyncTaskQueue.Dequeue(); task == nil {
+					break
+				}
+				switch err = task(); err {
+				case nil:
+				case errors.ErrServerShutdown:
+					return err
+				default:
+					logging.DefaultLogger.Warnf("Error occurs in user-defined function, %v", err)
+				}
+			}
+			atomic.StoreInt32(&p.netpollWakeSig, 0)
+			if !p.asyncTaskQueue.Empty() {
+				for _, err = unix.Write(p.wfd, b); err == unix.EINTR || err == unix.EAGAIN; _, err = unix.Write(p.wfd, b) {
+				}
+			}
+		}
+
+		if n == el.size {
+			el.expand()
+		} else if n < el.size>>1 {
+			el.shrink()
+		}
+	}
+}
+
 const (
 	readEvents      = unix.EPOLLPRI | unix.EPOLLIN
 	writeEvents     = unix.EPOLLOUT

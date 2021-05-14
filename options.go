@@ -102,6 +102,10 @@ type Options struct {
 	// Logger is the customized logger for logging info, if it is not set,
 	// then gnet will use the default logger powered by go.uber.org/zap.
 	Logger logging.Logger
+
+	// 时间轮的参数，Size表示时间轮（一轮）的大小，Tick表示最小一格的时间间隔
+	TimingWheelTick time.Duration
+	TimingWheelSize int64
 }
 
 // WithOptions sets up all options.
@@ -199,5 +203,19 @@ func WithCodec(codec ICodec) Option {
 func WithLogger(logger logging.Logger) Option {
 	return func(opts *Options) {
 		opts.Logger = logger
+	}
+}
+
+// WithTimingWheelTick 设置时间轮Tick参数
+func WithTimingWheelTick(t time.Duration) Option {
+	return func(opts *Options) {
+		opts.TimingWheelTick = t
+	}
+}
+
+// WithTimingWheelSize 设置时间轮Size参数
+func WithTimingWheelSize(s int64) Option {
+	return func(opts *Options) {
+		opts.TimingWheelSize = s
 	}
 }

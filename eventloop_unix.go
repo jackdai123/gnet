@@ -32,6 +32,7 @@ import (
 	"time"
 	"unsafe"
 
+	//"github.com/RussellLuo/timingwheel"
 	gerrors "github.com/panjf2000/gnet/errors"
 	"github.com/panjf2000/gnet/internal/netpoll"
 	"github.com/panjf2000/gnet/internal/socket"
@@ -56,6 +57,7 @@ type internalEventloop struct {
 	connections       map[int]*conn           // loop connections fd -> conn
 	eventHandler      EventHandler            // user eventHandler
 	calibrateCallback func(*eventloop, int32) // callback func for re-adjusting connCount
+	//mapTimer          map[int]*timingwheel.Timer // 串口连接与时间轮超时映射表
 }
 
 func (el *eventloop) closeAllConns() {
@@ -65,7 +67,7 @@ func (el *eventloop) closeAllConns() {
 	}
 }
 
-func (el *eventloop) loopRun(lockOSThread bool) {
+func (el *eventloop) loopRun(lockOSThread bool, protoAddr string) {
 	if lockOSThread {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
@@ -79,7 +81,16 @@ func (el *eventloop) loopRun(lockOSThread bool) {
 		el.svr.signalShutdown()
 	}()
 
-	err := el.poller.Polling(el.handleEvent)
+	var err error
+	if protoAddr == "Serial" { //串口Polling区别于网口
+		err = el.poller.PollingSerial(el.handleEvent)
+	} else {
+		err = el.poller.Polling(el.handleEvent)
+	}
+
+	if err != gerrors.ErrServerShutdown { //IO轮询出现异常，通知上层业务
+		el.eventHandler.OnError(nil, ErrPollPolling, err)
+	}
 	el.svr.logger.Infof("Event-loop(%d) is exiting due to error: %v", el.idx, err)
 }
 
@@ -118,11 +129,27 @@ func (el *eventloop) loopOpen(c *conn) error {
 
 	out, action := el.eventHandler.OnOpened(c)
 	if out != nil {
-		c.open(out)
+		if el.ln == nil { //主动服务，打开IO资源即发包
+			el.eventHandler.PreWrite()
+			if err := c.open2(out); err != nil {
+				return el.loopCloseConn(c, err)
+			}
+		} else { //被动服务
+			c.open(out)
+		}
 	}
 
 	if !c.outboundBuffer.IsEmpty() {
-		_ = el.poller.AddWrite(c.fd)
+		if err := el.poller.AddWrite(c.fd); err != nil {
+			el.eventHandler.OnError(c, ErrPollAddWrite, err)
+		}
+	} else {
+		//设置读超时
+		//el.mapTimer[c.fd] = el.svr.tw.AfterFunc(c.readTimeout, func() {
+		//})
+
+		//第一次发送完成，通知上层业务发送完成
+		el.eventHandler.OnSendSuccess(c)
 	}
 
 	return el.handleAction(c, action)
@@ -134,21 +161,30 @@ func (el *eventloop) loopRead(c *conn) error {
 		if err == unix.EAGAIN {
 			return nil
 		}
+		el.eventHandler.OnError(c, ErrRead, err) //IO系统调用出现异常，通知上层业务
 		return el.loopCloseConn(c, os.NewSyscallError("read", err))
 	}
 	c.buffer = el.packet[:n]
 
 	for inFrame, _ := c.read(); inFrame != nil; inFrame, _ = c.read() {
-		out, action := el.eventHandler.React(inFrame, c)
+		out, timeWait, action := el.eventHandler.React(inFrame, c)
 		if out != nil {
-			el.eventHandler.PreWrite()
-			// Encode data and try to write it back to the client, this attempt is based on a fact:
-			// a client socket waits for the response data after sending request data to the server,
-			// which makes the client socket writable.
-			if err = c.write(out); err != nil {
-				return err
+			if timeWait > 0 { //等待超时再发送，比如串口命令间隔
+				el.svr.tw.AfterFunc(timeWait, func() {
+					el.eventHandler.PreWrite()
+					c.AsyncWrite(out)
+				})
+			} else {
+				el.eventHandler.PreWrite()
+				// Encode data and try to write it back to the client, this attempt is based on a fact:
+				// a client socket waits for the response data after sending request data to the server,
+				// which makes the client socket writable.
+				if err = c.write(out); err != nil {
+					return err
+				}
 			}
 		}
+
 		switch action {
 		case None:
 		case Close:
@@ -177,6 +213,7 @@ func (el *eventloop) loopWrite(c *conn) error {
 		if err == unix.EAGAIN {
 			return nil
 		}
+		el.eventHandler.OnError(c, ErrWrite, err) //IO系统调用出现异常，通知上层业务
 		return el.loopCloseConn(c, os.NewSyscallError("write", err))
 	}
 	c.outboundBuffer.Shift(n)
@@ -187,6 +224,7 @@ func (el *eventloop) loopWrite(c *conn) error {
 			if err == unix.EAGAIN {
 				return nil
 			}
+			el.eventHandler.OnError(c, ErrWrite, err) //IO系统调用出现异常，通知上层业务
 			return el.loopCloseConn(c, os.NewSyscallError("write", err))
 		}
 		c.outboundBuffer.Shift(n)
@@ -195,7 +233,14 @@ func (el *eventloop) loopWrite(c *conn) error {
 	// All data have been drained, it's no need to monitor the writable events,
 	// remove the writable event from poller to help the future event-loops.
 	if c.outboundBuffer.IsEmpty() {
-		_ = el.poller.ModRead(c.fd)
+		if err := el.poller.ModRead(c.fd); err != nil {
+			el.eventHandler.OnError(c, ErrPollModRead, err)
+		}
+		//缓冲区发送完成，通知上层业务发送完成
+		el.eventHandler.OnSendSuccess(c)
+		//等待接收前需设置读超时
+		//el.mapTimer[c.fd] = el.svr.tw.AfterFunc(c.readTimeout, func() {
+		//})
 	}
 
 	return nil
@@ -222,22 +267,21 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 	if err0, err1 := el.poller.Delete(c.fd), unix.Close(c.fd); err0 == nil && err1 == nil {
 		delete(el.connections, c.fd)
 		el.calibrateCallback(el, -1)
-		if el.eventHandler.OnClosed(c, err) == Shutdown {
+		if el.eventHandler.OnClosed(c, err) == Shutdown { //连接关闭，通过OnClosed回调，通知外部（比如重连）
 			return gerrors.ErrServerShutdown
 		}
 		c.releaseConn()
-		deleteEndpoint(c.RemoteAddr().String(), c.fd) //endpointFarm与connection同步释放
-		pushEndpointEvent(&EndpointEvent{             //推送IO资源异常事件给外部
-			Type:    EndpointEventClose,
-			Address: c.RemoteAddr().String(),
-			Fd:      c.fd,
-			Err:     err,
-		})
+
+		if el.ln == nil { //主动服务
+			deleteEndpoint(c.RemoteAddr().String(), c.fd) //endpointFarm与connection同步释放
+		}
 	} else {
 		if err0 != nil {
+			el.eventHandler.OnError(c, ErrPollDelete, err0)
 			rerr = fmt.Errorf("failed to delete fd=%d from poller in event-loop(%d): %v", c.fd, el.idx, err0)
 		}
 		if err1 != nil {
+			el.eventHandler.OnError(c, ErrClose, err1)
 			err1 = fmt.Errorf("failed to close fd=%d in event-loop(%d): %v", c.fd, el.idx, os.NewSyscallError("close", err1))
 			if rerr != nil {
 				rerr = errors.New(rerr.Error() + " & " + err1.Error())
@@ -255,7 +299,7 @@ func (el *eventloop) loopWake(c *conn) error {
 		return nil // ignore stale wakes.
 	}
 
-	out, action := el.eventHandler.React(nil, c)
+	out, _, action := el.eventHandler.React(nil, c)
 	if out != nil {
 		if err := c.write(out); err != nil {
 			return err
@@ -318,7 +362,7 @@ func (el *eventloop) loopReadUDP(fd int) error {
 	}
 
 	c := newUDPConn(fd, el, sa)
-	out, action := el.eventHandler.React(el.packet[:n], c)
+	out, _, action := el.eventHandler.React(el.packet[:n], c)
 	if out != nil {
 		el.eventHandler.PreWrite()
 		_ = c.sendTo(out)
@@ -339,13 +383,20 @@ func (el *eventloop) loopReadUDP2(c *conn) error {
 		}
 		//return fmt.Errorf("failed to read UDP packet from fd=%d in event-loop(%d), %v",
 		//	c.fd, el.idx, os.NewSyscallError("recvfrom", err))
+		//主动服务recvfrom失败，通知上层业务，触发IO资源回收
+		el.eventHandler.OnError(c, ErrRecvFrom, err)
 		return el.loopCloseConn(c, os.NewSyscallError("recvfrom", err))
 	}
 
-	out, action := el.eventHandler.React(el.packet[:n], c)
+	out, _, action := el.eventHandler.React(el.packet[:n], c)
 	if out != nil {
 		el.eventHandler.PreWrite()
-		_ = c.sendTo(out) //UDP写失败就丢弃
+		//UDP发包，成功和失败均通知上层业务
+		if c.sendTo(out) == nil {
+			el.eventHandler.OnSendSuccess(c)
+		} else {
+			el.eventHandler.OnError(c, ErrSendTo, err)
+		}
 	}
 
 	switch action {

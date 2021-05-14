@@ -28,6 +28,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/jackdai123/endpoint"
 	"github.com/panjf2000/gnet/internal/socket"
@@ -51,17 +52,21 @@ type conn struct {
 	inboundBuffer  *ringbuffer.RingBuffer // buffer for data from client
 	outboundBuffer *ringbuffer.RingBuffer // buffer for data that is ready to write to client
 	endpointType   endpoint.EndPointType  // 连接的IO资源类型
+	readTimeout    time.Duration          // 一次完整数据包读取超时
+	writeTimeout   time.Duration          // 一次完整数据包发送超时
 }
 
-func newConn(t endpoint.EndPointType, fd int, el *eventloop, sa syscall.Sockaddr, remoteAddr net.Addr, codec ICodec) (c *conn) {
-	switch t {
+func newConn(p endpoint.EndPoint, el *eventloop, codec ICodec) (c *conn) {
+	switch p.Type() {
 	case endpoint.EndPointTCP, endpoint.EndPointUnix, endpoint.EndPointSerial:
-		c = newTCPConn(fd, el, sa, remoteAddr)
+		c = newTCPConn(p.Fd(), el, p.SockAddr(), p.NetAddr())
 	case endpoint.EndPointUDP:
-		c = newUDPConn(fd, el, sa)
+		c = newUDPConn(p.Fd(), el, p.SockAddr())
 	}
 
-	c.endpointType = t
+	c.endpointType = p.Type()
+	c.readTimeout = p.ReadTimeout()
+	c.writeTimeout = p.WriteTimeout()
 	if codec != nil {
 		c.codec = codec
 	}
@@ -122,16 +127,8 @@ func (c *conn) releaseUDP() {
 	c.remoteAddr = nil
 }
 
-//func (c *conn) sendTo(buf []byte) error {
 func (c *conn) open(buf []byte) {
-	c.loop.eventHandler.PreWrite()
-
-	if c.endpointType == endpoint.EndPointUDP { //UDP发送
-		_ = c.sendTo(buf)
-		return
-	}
-
-	n, err := unix.Write(c.fd, buf) //TCP、UnixSocket、串口发送
+	n, err := unix.Write(c.fd, buf)
 	if err != nil {
 		_, _ = c.outboundBuffer.Write(buf)
 		return
@@ -142,6 +139,35 @@ func (c *conn) open(buf []byte) {
 	}
 }
 
+// 区别于open，需对数据Encode再发，同时支持UDP
+func (c *conn) open2(buf []byte) (err error) {
+	var outFrame []byte
+	if outFrame, err = c.codec.Encode(c, buf); err != nil {
+		c.loop.eventHandler.OnError(c, ErrEncode, err) //IO系统调用出现异常，通知上层业务
+		return
+	}
+
+	//UDP发送
+	if c.endpointType == endpoint.EndPointUDP {
+		c.loop.eventHandler.OnError(c, ErrSendTo, err) //IO系统调用出现异常，通知上层业务
+		return c.sendTo(outFrame)
+	}
+
+	//TCP、UnixSocket、串口发送
+	//串口写缓冲区足够大（超过1k），通常发包不超100字节，故不存在写超时一说
+	n, err := unix.Write(c.fd, outFrame)
+	if err != nil {
+		_, _ = c.outboundBuffer.Write(outFrame)
+		return nil
+	}
+
+	if n < len(outFrame) {
+		_, _ = c.outboundBuffer.Write(outFrame[n:])
+	}
+
+	return
+}
+
 func (c *conn) read() ([]byte, error) {
 	return c.codec.Decode(c)
 }
@@ -149,6 +175,7 @@ func (c *conn) read() ([]byte, error) {
 func (c *conn) write(buf []byte) (err error) {
 	var outFrame []byte
 	if outFrame, err = c.codec.Encode(c, buf); err != nil {
+		c.loop.eventHandler.OnError(c, ErrEncode, err) //IO系统调用出现异常，通知上层业务
 		return
 	}
 	// If there is pending data in outbound buffer, the current data ought to be appended to the outbound buffer
@@ -163,15 +190,22 @@ func (c *conn) write(buf []byte) (err error) {
 		// A temporary error occurs, append the data to outbound buffer, writing it back to client in the next round.
 		if err == unix.EAGAIN {
 			_, _ = c.outboundBuffer.Write(outFrame)
-			err = c.loop.poller.ModReadWrite(c.fd)
+			if err = c.loop.poller.ModReadWrite(c.fd); err != nil {
+				c.loop.eventHandler.OnError(c, ErrPollModReadWrite, err) //IO系统调用出现异常，通知上层业务
+			}
 			return
 		}
+		c.loop.eventHandler.OnError(c, ErrWrite, err) //IO系统调用出现异常，通知上层业务
 		return c.loop.loopCloseConn(c, os.NewSyscallError("write", err))
 	}
 	// Fail to send all data back to client, buffer the leftover data for the next round.
 	if n < len(outFrame) {
 		_, _ = c.outboundBuffer.Write(outFrame[n:])
-		err = c.loop.poller.ModReadWrite(c.fd)
+		if err = c.loop.poller.ModReadWrite(c.fd); err != nil {
+			c.loop.eventHandler.OnError(c, ErrPollModReadWrite, err) //IO系统调用出现异常，通知上层业务
+		}
+	} else { //通知上层业务发送完成
+		c.loop.eventHandler.OnSendSuccess(c)
 	}
 	return
 }
@@ -255,13 +289,16 @@ func (c *conn) BufferLength() int {
 	return c.inboundBuffer.Length() + len(c.buffer)
 }
 
-func (c *conn) AsyncWrite(buf []byte) error {
-	return c.loop.poller.Trigger(func() error {
+func (c *conn) AsyncWrite(buf []byte) (err error) {
+	if err = c.loop.poller.Trigger(func() error {
 		if c.opened {
 			return c.write(buf)
 		}
 		return nil
-	})
+	}); err != nil {
+		c.loop.eventHandler.OnError(c, ErrPollTrigger, err)
+	}
+	return
 }
 
 func (c *conn) SendTo(buf []byte) error {
