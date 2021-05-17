@@ -1,4 +1,4 @@
-module github.com/panjf2000/gnet
+module github.com/jackdai123/gnet
 
 go 1.15
 
