@@ -22,7 +22,7 @@ package gnet
 
 import (
 	"github.com/jackdai123/endpoint"
-	"github.com/panjf2000/gnet/internal/netpoll"
+	"github.com/jackdai123/gnet/internal/netpoll"
 )
 
 func (el *eventloop) handleEvent(fd int, ev uint32) error {

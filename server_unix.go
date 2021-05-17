@@ -31,9 +31,9 @@ import (
 
 	"github.com/RussellLuo/timingwheel"
 	"github.com/jackdai123/endpoint"
-	"github.com/panjf2000/gnet/errors"
-	"github.com/panjf2000/gnet/internal/logging"
-	"github.com/panjf2000/gnet/internal/netpoll"
+	"github.com/jackdai123/gnet/errors"
+	"github.com/jackdai123/gnet/internal/logging"
+	"github.com/jackdai123/gnet/internal/netpoll"
 )
 
 type server struct {

@@ -23,7 +23,7 @@ package gnet
 import (
 	"time"
 
-	"github.com/panjf2000/gnet/internal/logging"
+	"github.com/jackdai123/gnet/internal/logging"
 )
 
 // Option is a function that will set up option.

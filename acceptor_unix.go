@@ -26,8 +26,8 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/panjf2000/gnet/errors"
-	"github.com/panjf2000/gnet/internal/socket"
+	"github.com/jackdai123/gnet/errors"
+	"github.com/jackdai123/gnet/internal/socket"
 	"golang.org/x/sys/unix"
 )
 

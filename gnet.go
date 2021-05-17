@@ -30,9 +30,9 @@ import (
 	"time"
 
 	"github.com/jackdai123/endpoint"
-	"github.com/panjf2000/gnet/errors"
-	"github.com/panjf2000/gnet/internal"
-	"github.com/panjf2000/gnet/internal/logging"
+	"github.com/jackdai123/gnet/errors"
+	"github.com/jackdai123/gnet/internal"
+	"github.com/jackdai123/gnet/internal/logging"
 )
 
 // Action is an action that occurs after the completion of an event.
