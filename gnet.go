@@ -418,7 +418,7 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 }
 
 // 主动服务打开IO资源后，关闭IO资源，protoAddr是Serial或Network
-func CloseEndPoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
+func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 	if protoAddr != "Serial" && protoAddr != "Network" {
 		return errors.ErrUnsupportedPositiveServer
 	}
