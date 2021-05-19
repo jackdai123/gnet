@@ -163,6 +163,9 @@ type Conn interface {
 
 	// Close closes the current connection.
 	Close() error
+
+	// Fd 返回文件描述符
+	Fd() int
 }
 
 type (
@@ -368,9 +371,12 @@ func Stop(ctx context.Context, protoAddr string) error {
 // 主动服务启动后，添加要打开的IO资源（串口或网口地址），protoAddr是Serial或Network
 // 一种特殊情况，当打开串口服务器时，protoAddr是Serial，conf是TCPConfig
 // codec指定Encode和Decode方法，用以数据帧的打包和解包，Endpoint对应唯一codec，即一个串口下只允许接同类设备
-func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) (err error) {
+// 返回值started表示服务是否已经启动起来，如果未启动完成，则需要sleep等待
+func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) (started bool, err error) {
+	started = true
 	if protoAddr != "Serial" && protoAddr != "Network" {
-		return errors.ErrUnsupportedPositiveServer
+		err = errors.ErrUnsupportedPositiveServer
+		return
 	}
 
 	// 根据IO资源类型找到对应的主动服务
@@ -378,17 +384,19 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 	if s, ok := serverFarm.Load(protoAddr); ok {
 		svr = s.(*server)
 		if svr.isInShutdown() {
-			return errors.ErrServerInShutdown
+			err = errors.ErrServerInShutdown
+			return
 		}
 	} else {
-		return errors.ErrServerInShutdown
+		started = false
+		return
 	}
 
 	// 打开并管理IO资源，网络资源可以被打开多次
 	var p endpoint.EndPoint
 	p, err = openEndpoint(protoAddr, conf)
 	if err != nil {
-		return err
+		return
 	}
 
 	// 根据负载均衡定位到相应的IO线程
@@ -418,9 +426,12 @@ func OpenEndpoint(protoAddr string, conf endpoint.EndPointConfig, codec ICodec) 
 }
 
 // 主动服务打开IO资源后，关闭IO资源，protoAddr是Serial或Network
-func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
+// 返回值started表示服务是否已经启动起来，如果未启动完成，则CloseEndpoint无效
+func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (started bool, err error) {
+	started = true
 	if protoAddr != "Serial" && protoAddr != "Network" {
-		return errors.ErrUnsupportedPositiveServer
+		err = errors.ErrUnsupportedPositiveServer
+		return
 	}
 
 	// 根据IO资源类型找到对应的主动服务
@@ -428,10 +439,12 @@ func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 	if s, ok := serverFarm.Load(protoAddr); ok {
 		svr = s.(*server)
 		if svr.isInShutdown() {
-			return errors.ErrServerInShutdown
+			err = errors.ErrServerInShutdown
+			return
 		}
 	} else {
-		return errors.ErrServerInShutdown
+		started = false
+		return
 	}
 
 	// 根据网络地址或串口文件路径，查找已打开的EndPoint，定位到相应的IO线程去关闭IO资源
@@ -444,11 +457,8 @@ func CloseEndpoint(protoAddr string, conf endpoint.EndPointConfig) (err error) {
 		}
 		return
 	})
-	if err != nil {
-		return
-	}
 
-	deleteEndpointAll(conf.AddressName())
+	//deleteEndpointAll(conf.AddressName())
 	return
 }
 

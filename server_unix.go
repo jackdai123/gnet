@@ -24,6 +24,7 @@
 package gnet
 
 import (
+	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -279,9 +280,9 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 		return options.Codec
 	}()
 
-	//默认串口超时区间在10ms到5000ms，串口命令间隔时间最小XXms
-	var tick time.Duration = 10 * time.Millisecond
-	var size int64 = 500
+	//默认串口超时区间在10ms到5000ms，串口命令间隔时间最小5ms（温湿度和资产条）
+	var tick time.Duration = 5 * time.Millisecond
+	var size int64 = 1000
 	if options.TimingWheelTick > 0 {
 		tick = options.TimingWheelTick
 	}
@@ -295,18 +296,18 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 		svr.tw.Start()
 	}
 
+	var addr net.Addr
+	if listener != nil {
+		addr = listener.lnaddr
+	}
+
 	server := Server{
 		svr:          svr,
 		Multicore:    options.Multicore,
-		Addr:         listener.lnaddr,
+		Addr:         addr,
 		NumEventLoop: numEventLoop,
 		ReusePort:    options.ReusePort,
 		TCPKeepAlive: options.TCPKeepAlive,
-	}
-	switch svr.eventHandler.OnInitComplete(server) {
-	case None:
-	case Shutdown:
-		return nil
 	}
 
 	if err := svr.start(protoAddr, numEventLoop); err != nil {
@@ -317,6 +318,12 @@ func serve(eventHandler EventHandler, listener *listener, options *Options, prot
 	defer svr.stop(server)
 
 	serverFarm.Store(protoAddr, svr)
+	switch svr.eventHandler.OnInitComplete(server) {
+	case None:
+	case Shutdown:
+		svr.signalShutdown()
+		serverFarm.Delete(protoAddr)
+	}
 
 	return nil
 }

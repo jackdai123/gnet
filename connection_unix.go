@@ -83,12 +83,17 @@ func (c *conn) releaseConn() {
 }
 
 func newTCPConn(fd int, el *eventloop, sa syscall.Sockaddr, remoteAddr net.Addr) (c *conn) {
+	var addr net.Addr
+	if el.ln != nil {
+		addr = el.ln.lnaddr
+	}
+
 	return &conn{
 		fd:             fd,
 		sa:             sa,
 		loop:           el,
 		codec:          el.svr.codec,
-		localAddr:      el.ln.lnaddr,
+		localAddr:      addr,
 		remoteAddr:     remoteAddr,
 		inboundBuffer:  prb.Get(),
 		outboundBuffer: prb.Get(),
@@ -112,16 +117,22 @@ func (c *conn) releaseTCP() {
 }
 
 func newUDPConn(fd int, el *eventloop, sa syscall.Sockaddr) *conn {
+	var addr net.Addr
+	if el.ln != nil {
+		addr = el.ln.lnaddr
+	}
+
 	return &conn{
 		fd:           fd,
 		sa:           sa,
-		localAddr:    el.ln.lnaddr,
+		localAddr:    addr,
 		remoteAddr:   socket.SockaddrToUDPAddr(sa),
 		endpointType: endpoint.EndPointUDP,
 	}
 }
 
 func (c *conn) releaseUDP() {
+	c.opened = false
 	c.ctx = nil
 	c.localAddr = nil
 	c.remoteAddr = nil
@@ -149,8 +160,10 @@ func (c *conn) open2(buf []byte) (err error) {
 
 	//UDP发送
 	if c.endpointType == endpoint.EndPointUDP {
-		c.loop.eventHandler.OnError(c, ErrSendTo, err) //IO系统调用出现异常，通知上层业务
-		return c.sendTo(outFrame)
+		if err = c.sendTo(outFrame); err != nil {
+			c.loop.eventHandler.OnError(c, ErrSendTo, err) //IO系统调用出现异常，通知上层业务
+		}
+		return
 	}
 
 	//TCP、UnixSocket、串口发送
@@ -321,3 +334,4 @@ func (c *conn) Context() interface{}       { return c.ctx }
 func (c *conn) SetContext(ctx interface{}) { c.ctx = ctx }
 func (c *conn) LocalAddr() net.Addr        { return c.localAddr }
 func (c *conn) RemoteAddr() net.Addr       { return c.remoteAddr }
+func (c *conn) Fd() int                    { return c.fd }

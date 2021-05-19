@@ -33,6 +33,7 @@ import (
 	"unsafe"
 
 	//"github.com/RussellLuo/timingwheel"
+	"github.com/jackdai123/endpoint"
 	gerrors "github.com/jackdai123/gnet/errors"
 	"github.com/jackdai123/gnet/internal/netpoll"
 	"github.com/jackdai123/gnet/internal/socket"
@@ -139,7 +140,7 @@ func (el *eventloop) loopOpen(c *conn) error {
 		}
 	}
 
-	if !c.outboundBuffer.IsEmpty() {
+	if c.endpointType != endpoint.EndPointUDP && !c.outboundBuffer.IsEmpty() {
 		if err := el.poller.AddWrite(c.fd); err != nil {
 			el.eventHandler.OnError(c, ErrPollAddWrite, err)
 		}
@@ -151,6 +152,8 @@ func (el *eventloop) loopOpen(c *conn) error {
 		//第一次发送完成，通知上层业务发送完成
 		el.eventHandler.OnSendSuccess(c)
 	}
+
+	fmt.Printf("eventloop(idx=%v connCount=%v) open remote(addr=%v fd=%v)\n", el.idx, el.connCount, c.remoteAddr, c.fd)
 
 	return el.handleAction(c, action)
 }
@@ -253,15 +256,34 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 	}
 
 	// Send residual data in buffer back to client before actually closing the connection.
-	if !c.outboundBuffer.IsEmpty() {
+	if el.ln != nil && c.endpointType != endpoint.EndPointUDP && !c.outboundBuffer.IsEmpty() {
 		el.eventHandler.PreWrite()
 
 		head, tail := c.outboundBuffer.LazyReadAll()
-		if n, err := unix.Write(c.fd, head); err == nil {
+		if n, err0 := unix.Write(c.fd, head); err0 == nil {
 			if n == len(head) && tail != nil {
 				_, _ = unix.Write(c.fd, tail)
 			}
 		}
+	}
+
+	if el.ln == nil {
+		//主动服务，关闭socket前清空系统缓冲区中的数据
+		if c.endpointType == endpoint.EndPointUDP {
+			if n, _, err0 := syscall.Recvfrom(c.fd, el.packet, 0); err0 == nil {
+				el.eventHandler.React(el.packet[:n], c)
+			}
+		} else {
+			if n, err0 := unix.Read(c.fd, el.packet); err0 == nil {
+				c.buffer = el.packet[:n]
+				for inFrame, _ := c.read(); inFrame != nil; inFrame, _ = c.read() {
+					el.eventHandler.React(inFrame, c)
+				}
+			}
+		}
+
+		//endpointFarm与connection同步释放
+		deleteEndpoint(c.RemoteAddr().String(), c.fd)
 	}
 
 	if err0, err1 := el.poller.Delete(c.fd), unix.Close(c.fd); err0 == nil && err1 == nil {
@@ -271,10 +293,6 @@ func (el *eventloop) loopCloseConn(c *conn, err error) (rerr error) {
 			return gerrors.ErrServerShutdown
 		}
 		c.releaseConn()
-
-		if el.ln == nil { //主动服务
-			deleteEndpoint(c.RemoteAddr().String(), c.fd) //endpointFarm与connection同步释放
-		}
 	} else {
 		if err0 != nil {
 			el.eventHandler.OnError(c, ErrPollDelete, err0)
