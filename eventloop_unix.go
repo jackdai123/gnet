@@ -153,8 +153,6 @@ func (el *eventloop) loopOpen(c *conn) error {
 		el.eventHandler.OnSendSuccess(c)
 	}
 
-	fmt.Printf("eventloop(idx=%v connCount=%v) open remote(addr=%v fd=%v)\n", el.idx, el.connCount, c.remoteAddr, c.fd)
-
 	return el.handleAction(c, action)
 }
 
